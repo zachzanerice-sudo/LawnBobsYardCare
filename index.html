@@ -313,8 +313,8 @@ textarea{resize:vertical}
       </select>
       <div id="cSched" style="display:grid;gap:8px">
         <div class="row">
-          <div style="flex:1;display:grid;gap:3px"><label class="flabel" for="cDay">Route day</label><select id="cDay"></select></div>
-          <div style="flex:1;display:grid;gap:3px"><label class="flabel" for="cStart" id="cStartLbl">Next mow date</label><input id="cStart" type="date"></div>
+          <div style="flex:1;display:grid;gap:3px"><label class="flabel" for="cDayA" id="cLblA">Week A day</label><select id="cDayA"></select></div>
+          <div style="flex:1;display:grid;gap:3px"><label class="flabel" for="cDayB" id="cLblB">Week B day</label><select id="cDayB"></select></div>
         </div>
         <div class="row">
           <input id="cSvc" list="svcList" placeholder="Service (e.g. Lawn maintenance)" aria-label="Service" maxlength="100">
@@ -322,7 +322,8 @@ textarea{resize:vertical}
         </div>
         <p class="csum" style="margin:0" id="cSchedHint"></p>
       </div>
-      <input id="cNotes" placeholder="Notes (gate code, dog, call don't text…)" aria-label="Notes" maxlength="200">
+      <input id="cNotes" placeholder="Notes (gate code, dog, side yard…)" aria-label="Notes" maxlength="200">
+      <label class="flabel" style="display:flex;gap:8px;align-items:center;font-size:.92rem;color:var(--ink)"><input type="checkbox" id="cNoText" style="width:20px;height:20px;min-height:0"> Calls only — don't text this client</label>
       <p class="ferr" id="cErr" role="alert"></p>
       <div class="row">
         <button class="btn" id="cSave">Save client</button>
@@ -545,7 +546,7 @@ const DEF_SETTINGS={owner:"Zach",bizName:"Lawn Bobs Yard Care",area:"Houston, Te
   invTerms:"Payment is due upon receipt. Thank you for choosing Lawn Bobs Yard Care!",
   payable:"Lawn Bobs Yard Care",venmo:"",cashapp:"",zelle:"",
   otw:"Hi {first}, this is {me} with Lawn Bobs Yard Care. I'm on my way to take care of your yard and should be there shortly!",
-  taxPct:25,goalWeek:1850,goalMonth:8000,nextInv:2001,nextQuote:1001,lastBackup:null,snooze:0,backupPhotos:true,theme:"auto",photosOnInvoice:true};
+  rotA:"2026-10-12",calSync:null,taxPct:25,goalWeek:1850,goalMonth:8000,nextInv:2001,nextQuote:1001,lastBackup:null,snooze:0,backupPhotos:true,theme:"auto",photosOnInvoice:true};
 const S={jobs:[],clients:[],ledger:[],quotes:[],invoices:[],settings:{...DEF_SETTINGS}};
 const KEYS=["jobs","clients","ledger","quotes","invoices","settings"];
 let idb=null; const memPhotos=new Map();
@@ -605,18 +606,30 @@ const liveClients=()=>S.clients.filter(c=>!c.deleted);
 function clientByName(n){const k=norm(n);return k?liveClients().find(c=>norm(c.n)===k):null;}
 function primaryAddr(c){if(!c||!c.props||!c.props.length)return "";const p=c.props.find(p=>!/billing/i.test(p.l||""))||c.props[0];return p.a||"";}
 const clientOf=j=>(j.clientId&&clientById(j.clientId))||clientByName(j.name);
+// Two-week rotation: "A" weeks and "B" weeks alternate. Each client lists the day(s) they're mowed in each.
+const rotA=()=>S.settings.rotA||"2026-10-12";
+const weekLetter=k=>(((weeksBetween(rotA(),k)%2)+2)%2)?"B":"A";
+function migrateClient(c){
+  if(Array.isArray(c.visits))return c;
+  c.visits=[];
+  if(c.day!=null&&c.g==="weekly")c.visits=[{w:"A",day:c.day},{w:"B",day:c.day}];
+  else if(c.day!=null&&c.g==="biweekly")c.visits=[{w:weekLetter(c.start||THIS_WEEK),day:c.day}];
+  return c;}
+const scheduled=c=>(c.g==="weekly"||c.g==="biweekly")&&(c.visits||[]).length>0;
+function visitsIn(c,week){const L=weekLetter(week);return (c.visits||[]).filter(v=>v.w===L).sort((a,b)=>a.day-b.day);}
 function nextVisit(c){
-  if(!(c.g==="weekly"||c.g==="biweekly")||c.day==null)return null;
-  let w=c.start&&c.start>THIS_WEEK?c.start:THIS_WEEK;
-  if(c.g==="biweekly"&&c.start&&weeksBetween(c.start,w)%2!==0)w=shiftWeek(w,1);
-  const d=dayDate(w,c.day); if(d<dParse(todayKey()))return dayDate(shiftWeek(w,c.g==="biweekly"?2:1),c.day);
-  return d;}
+  if(!scheduled(c))return null; const today=dParse(todayKey());
+  for(let n=0;n<3;n++){const w=shiftWeek(THIS_WEEK,n);for(const v of visitsIn(c,w)){const d=dayDate(w,v.day);if(d>=today)return d;}}
+  return null;}
 function schedText(c){
   if(c.g==="inactive")return "Inactive";
   if(c.g==="none")return "No recurring visits";
-  if(c.day==null)return "";
-  const nv=nextVisit(c);const every=c.g==="weekly"?`Every ${FULL[c.day]}`:`Every other ${FULL[c.day]}`;
-  return `${every}${c.price?` · ${money(c.price)}`:""}${nv?` · next ${MON[nv.getMonth()]} ${nv.getDate()}`:""}`;}
+  if(!scheduled(c))return "";
+  const A=(c.visits||[]).filter(v=>v.w==="A").map(v=>FULL[v.day]), B=(c.visits||[]).filter(v=>v.w==="B").map(v=>FULL[v.day]);
+  let t; if(A.length&&B.length)t=A.join("/")===B.join("/")?`Every ${A.join(" & ")}`:`${A.join(" & ")} on A weeks · ${B.join(" & ")} on B weeks`;
+  else t=`Every other ${(A.length?A:B).join(" & ")} (${A.length?"A":"B"} weeks)`;
+  const nv=nextVisit(c);
+  return `${t}${c.price?` · ${money(c.price)}`:""}${nv?` · next ${DAYS[(nv.getDay()+6)%7]} ${MON[nv.getMonth()]} ${nv.getDate()}`:""}`;}
 
 /* ===================== jobs & auto-fill ===================== */
 let viewWeek=THIS_WEEK, filter=todayIdx, showDone=false;
@@ -631,7 +644,8 @@ const mapsUrl=a=>"https://www.google.com/maps/dir/?api=1&destination="+encodeURI
 function routeUrl(stops){const s=stops.slice(0,4);const dest=s[s.length-1],wp=s.slice(0,-1);
   return "https://www.google.com/maps/dir/?api=1&destination="+encodeURIComponent(dest)+(wp.length?"&waypoints="+encodeURIComponent(wp.join("|")):"")+"&travelmode=driving";}
 function smsUrl(ph,body){return `sms:${digits(ph)}?body=${encodeURIComponent(body)}`;}
-function otwUrl(j){const ph=jobPhone(j);if(!ph)return "";
+const noText=j=>{const c=clientOf(j);return !!(c&&c.noText);};
+function otwUrl(j){const ph=jobPhone(j);if(!ph||noText(j))return "";
   const msg=(S.settings.otw||DEF_SETTINGS.otw).replace(/\{first\}/g,firstName(j.name)).replace(/\{me\}/g,S.settings.owner||"");return smsUrl(ph,msg);}
 const orderOf=j=>j.order!=null?j.order:j.created;
 
@@ -639,14 +653,18 @@ function autoFill(week){
   if(week<THIS_WEEK)return;
   let added=false;
   for(const c of liveClients()){
-    if(!(c.g==="weekly"||c.g==="biweekly")||c.day==null)continue;
-    const anchor=c.start||THIS_WEEK; if(week<anchor)continue;
-    if(c.g==="biweekly"&&weeksBetween(anchor,week)%2!==0)continue;
-    const id=`a-${c.id}-${week}`;
-    if(S.jobs.some(j=>j.id===id))continue;
-    if(S.jobs.some(j=>j.week===week&&!j.removed&&(j.clientId===c.id||norm(j.name)===norm(c.n))))continue;
-    S.jobs.push({id,clientId:c.id,auto:true,name:c.n,addr:primaryAddr(c),detail:c.svc||"Lawn maintenance",note:c.notes||"",price:+c.price||0,extras:[],day:c.day,week,created:Date.now()+c.day,done:false});
-    added=true;
+    if(!scheduled(c))continue;
+    if(c.since&&week<c.since)continue;
+    const vs=visitsIn(c,week); if(!vs.length)continue;
+    const mine=S.jobs.filter(j=>j.week===week&&!j.removed&&(j.clientId===c.id||norm(j.name)===norm(c.n)));
+    if(mine.length>=vs.length)continue;
+    for(const v of vs){
+      const id=`a-${c.id}-${week}-${v.day}`;
+      if(S.jobs.some(j=>j.id===id))continue;               // already made, or skipped on purpose
+      if(mine.some(j=>j.day===v.day))continue;
+      S.jobs.push({id,clientId:c.id,auto:true,name:c.n,addr:primaryAddr(c),detail:c.svc||"Lawn maintenance",note:c.notes||"",price:+c.price||0,extras:[],day:v.day,week,created:Date.now()+v.day,done:false});
+      added=true;
+    }
   }
   if(added)save("jobs");
 }
@@ -680,7 +698,7 @@ function jobHTML(j,list){
     </div>
     <div class="jacts">
       ${addr?`<a class="act go" href="${mapsUrl(addr)}" target="_blank" rel="noopener">${ICON.nav}<span>Navigate</span></a>`:""}
-      ${otw?`<a class="act" href="${otw}">${ICON.msg}<span>On my way</span></a>`:""}
+      ${otw?`<a class="act" href="${otw}">${ICON.msg}<span>On my way</span></a>`:noText(j)&&jobPhone(j)?`<a class="act" href="tel:${digits(jobPhone(j))}">${ICON.phone}<span>Call (no texts)</span></a>`:""}
       <button class="act jphotos compact" aria-label="Photos${pc?`, ${pc} saved`:""}">${ICON.cam}${pc?`<span>${pc}</span>`:""}</button>
       <button class="act more${toolsId===j.id?" on":""}" aria-label="More options for ${esc(j.name)}" aria-expanded="${toolsId===j.id}">${ICON.dots}</button>
     </div>
@@ -721,7 +739,7 @@ function renderDays(){
   const open=openJobs(); const isThis=viewWeek===THIS_WEEK;
   const opts=[["all","Week",open.length,false],...DAYS.map((d,i)=>[i,`${d} ${dayDate(viewWeek,i).getDate()}`,open.filter(j=>j.day===i).length,isThis&&i===todayIdx])];
   $("days").innerHTML=opts.map(([v,l,c,t])=>`<button class="chip${t?" today":""}" data-v="${v}" aria-pressed="${String(v)===String(filter)}"${t?` aria-label="${l}, today"`:""}>${l}<span class="n">${c}</span></button>`).join("");
-  $("wRange").textContent=weekRange(viewWeek); $("wSub").textContent=weekRel(viewWeek)+(isThis?"":" · tap for this week");
+  $("wRange").textContent=weekRange(viewWeek)+" · Week "+weekLetter(viewWeek); $("wSub").textContent=weekRel(viewWeek)+(isThis?"":" · tap for this week");
 }
 function renderTally(){
   const done=S.jobs.filter(j=>inView(j)&&j.done), all=S.jobs.filter(inView);
@@ -927,15 +945,15 @@ function renderClients(){
     return hay.includes(q)||(dq.length>=3&&digits(c.ph).includes(dq));});
   const cnt=g=>all.filter(c=>c.g===g).length;
   $("csum").textContent=`${all.length-cnt("inactive")} clients: ${cnt("weekly")} weekly · ${cnt("biweekly")} bi-weekly · ${cnt("none")} unscheduled · ${cnt("inactive")} inactive`+(q?` · showing ${list.length}`:"");
-  const card=c=>{const st=schedText(c), addr=primaryAddr(c), needDay=(c.g==="weekly"||c.g==="biweekly")&&c.day==null;
+  const card=c=>{const st=schedText(c), addr=primaryAddr(c), needDay=(c.g==="weekly"||c.g==="biweekly")&&!scheduled(c);
     return `<li class="client${c.g==="inactive"?" off":""}">
     <div class="top"><div><div class="cn">${esc(c.n)}</div>${c.co?`<div class="co">${esc(c.co)}</div>`:""}</div>${
       c.g==="inactive"?`<span class="badge inactive">Inactive</span>`:c.g==="weekly"?`<span class="badge freq">Weekly</span>`:c.g==="biweekly"?`<span class="badge freq bi">Bi-weekly</span>`:`<span class="badge">Unscheduled</span>`}</div>
-    ${needDay?`<div class="sched warn">No route day yet — tap Edit to auto-fill this client's jobs</div>`:st&&c.g!=="inactive"&&c.g!=="none"?`<div class="sched">${esc(st)}</div>`:""}
+    ${needDay?`<div class="sched warn">No route days yet — tap Edit to auto-fill this client's jobs</div>`:st&&c.g!=="inactive"&&c.g!=="none"?`<div class="sched">${esc(st)}</div>`:""}
     <ul class="props">${(c.props||[]).map(p=>`<li>${p.l?`<b>${esc(p.l)}:</b> `:""}${esc(p.a)}</li>`).join("")}</ul>
     ${c.notes?`<div class="cnote">${esc(c.notes)}</div>`:""}
     <div class="acts">
-      ${c.ph?`<a class="link call" href="tel:${digits(c.ph)}">${ICON.phone}${esc(c.ph)}</a><a class="link" href="sms:${digits(c.ph)}">Text</a>`:""}
+      ${c.ph?`<a class="link call" href="tel:${digits(c.ph)}">${ICON.phone}${esc(c.ph)}</a>${c.noText?`<span class="badge">Calls only</span>`:`<a class="link" href="sms:${digits(c.ph)}">Text</a>`}`:""}
       ${addr?`<a class="link" href="${mapsUrl(addr)}" target="_blank" rel="noopener">${ICON.nav}Map</a>`:""}
       ${c.em?`<a class="link" href="mailto:${esc(c.em)}">Email</a>`:""}
       <button class="link cedit" data-cid="${c.id}">Edit</button><button class="link danger cdel" data-cid="${c.id}">Delete</button>
@@ -945,41 +963,41 @@ function renderClients(){
     ||`<li class="empty">${all.length?"No clients match that search.":"No clients yet. Tap + Add new client, or import your data from Settings."}</li>`;
 }
 function propRow(l="",a=""){return `<div class="prow"><input class="pl" placeholder="Label" aria-label="Property label (optional)" value="${esc(l)}" maxlength="30"><input class="pa" placeholder="Street, city" aria-label="Property address" value="${esc(a)}" maxlength="120"><button class="x prm" type="button" aria-label="Remove this property">×</button></div>`;}
+function nextWeekOf(letter){let w=THIS_WEEK;if(weekLetter(w)!==letter)w=shiftWeek(w,1);return w;}
 function syncSchedFields(){const g=$("cG").value, on=g==="weekly"||g==="biweekly";$("cSched").hidden=!on;
-  $("cStartLbl").textContent=g==="biweekly"?"Next mow date":"Start date";
-  $("cSchedHint").textContent=g==="biweekly"?"Pick the date of their next mow. Jobs then fill in every other week from there.":"Jobs fill in every week on the route day.";}
+  const a=dParse(nextWeekOf("A")), b=dParse(nextWeekOf("B"));
+  $("cLblA").textContent=`Week A day (${weekLetter(THIS_WEEK)==="A"?"this week":"wk of "+MON[a.getMonth()]+" "+a.getDate()})`;
+  $("cLblB").textContent=`Week B day (${weekLetter(THIS_WEEK)==="B"?"this week":"wk of "+MON[b.getMonth()]+" "+b.getDate()})`;
+  $("cSchedHint").textContent=g==="weekly"?"Weekly: pick a day for both weeks (can be different days).":"Every other week: pick a day in just one of the weeks.";}
 function openClientForm(c){
   editingClient=c||null; $("cFormTitle").textContent=c?"Edit client":"New client";
   $("cName").value=c?c.n:""; $("cCo").value=c&&c.co||""; $("cPh").value=c&&c.ph||""; $("cEm").value=c&&c.em||"";
   $("cG").value=c?c.g:"biweekly";
-  $("cDay").innerHTML=`<option value="">Pick a day</option>`+FULL.map((d,i)=>`<option value="${i}">${d}</option>`).join("");
-  $("cDay").value=c&&c.day!=null?String(c.day):"";
-  const nv=c&&nextVisit(c); $("cStart").value=nv?dKey(nv):"";
-  $("cSvc").value=c&&c.svc||"Lawn maintenance"; $("cPrice").value=c&&c.price||""; $("cNotes").value=c&&c.notes||"";
+  const opts=`<option value="">Not mowed</option>`+FULL.map((d,i)=>`<option value="${i}">${d}</option>`).join("");
+  $("cDayA").innerHTML=opts; $("cDayB").innerHTML=opts;
+  const va=c&&(c.visits||[]).find(v=>v.w==="A"), vb=c&&(c.visits||[]).find(v=>v.w==="B");
+  $("cDayA").value=va?String(va.day):""; $("cDayB").value=vb?String(vb.day):"";
+  $("cSvc").value=c&&c.svc||"Lawn maintenance"; $("cPrice").value=c&&c.price||""; $("cNotes").value=c&&c.notes||""; $("cNoText").checked=!!(c&&c.noText);
   $("cProps").innerHTML=(c&&c.props&&c.props.length?c.props:[{l:"",a:""}]).map(p=>propRow(p.l,p.a)).join("");
   $("cErr").textContent=""; syncSchedFields(); $("cForm").hidden=false; $("cOpen").hidden=true;
   window.scrollTo({top:$("cForm").offsetTop-20,behavior:"smooth"}); $("cName").focus({preventScroll:true});
 }
 function closeClientForm(){$("cForm").hidden=true;$("cOpen").hidden=false;editingClient=null;}
-$("cDay").addEventListener("change",()=>{ // default the date to the next one on that weekday
-  if($("cDay").value===""||$("cStart").value)return; const d=+$("cDay").value; let w=THIS_WEEK; if(dayDate(w,d)<dParse(todayKey()))w=shiftWeek(w,1); $("cStart").value=dKey(dayDate(w,d));});
-$("cStart").addEventListener("change",()=>{if(!$("cStart").value)return;const d=(dParse($("cStart").value).getDay()+6)%7;$("cDay").value=String(d);});
 function saveClient(){
   const n=$("cName").value.trim().replace(/\s+/g," "); if(!n){$("cErr").textContent="Add the client's name.";$("cName").focus();return;}
   const em=$("cEm").value.trim(); if(!okEmail(em)){$("cErr").textContent="That email doesn't look right.";$("cEm").focus();return;}
   const props=[...$("cProps").querySelectorAll(".prow")].map(r=>({l:r.querySelector(".pl").value.trim(),a:r.querySelector(".pa").value.trim()})).filter(p=>p.a);
-  const g=$("cG").value, sched=g==="weekly"||g==="biweekly";
-  const day=sched&&$("cDay").value!==""?+$("cDay").value:null;
-  if(sched&&day==null&&$("cStart").value===""){/* allowed: no day means no auto-fill */}
-  let start=null; if(sched&&day!=null){start=$("cStart").value?mondayOf(dParse($("cStart").value)):THIS_WEEK;}
+  let g=$("cG").value; const sched=g==="weekly"||g==="biweekly";
+  const visits=[]; if(sched){if($("cDayA").value!=="")visits.push({w:"A",day:+$("cDayA").value});if($("cDayB").value!=="")visits.push({w:"B",day:+$("cDayB").value});}
+  if(sched&&visits.length)g=visits.length>1?"weekly":"biweekly";
   const base=editingClient||{id:"c-"+uid(),added:Date.now()};
-  const c={...base,n,co:$("cCo").value.trim()||null,ph:$("cPh").value.trim()?fmtPhone($("cPh").value):null,em:em||null,g,props,day,start,svc:$("cSvc").value.trim(),price:num($("cPrice").value),notes:$("cNotes").value.trim()};
+  const c={...base,n,co:$("cCo").value.trim()||null,ph:$("cPh").value.trim()?fmtPhone($("cPh").value):null,em:em||null,g,props,visits,svc:$("cSvc").value.trim(),price:num($("cPrice").value),notes:$("cNotes").value.trim(),noText:$("cNoText").checked};
+  delete c.day; delete c.start;
   S.clients=S.clients.filter(x=>x.id!==c.id).concat(c);
   const wasEdit=!!editingClient; closeClientForm(); resetAutoJobs(c.id);
-  // keep names on this client's open jobs in step
   if(wasEdit)S.jobs.forEach(j=>{if(j.clientId===c.id&&!j.done){j.name=c.n;}});
   save("clients","jobs"); cFilter="all"; syncChips("cfilters","f","all"); $("csearch").value="";
-  renderClients(); renderJobs(); toast(`${c.n} ${wasEdit?"updated":"added"}${c.day!=null?" · on "+FULL[c.day]+"s":""}`);
+  renderClients(); renderJobs(); toast(`${c.n} ${wasEdit?"updated":"added"}${visits.length?" · "+schedText(c).split(" · ")[0]:""}`);
 }
 async function deleteClient(id){
   const c=clientById(id); if(!c)return; if(!await ask(`Delete ${c.n} from your client list? Their upcoming auto-filled jobs are removed too.`,"Delete"))return;
@@ -1407,6 +1425,7 @@ async function backupNow(){
 }
 async function restoreFile(file){
   let j; try{j=JSON.parse(await file.text());}catch(e){toast("That file isn't a Lawn Bobs backup");return;}
+  if(j&&j.app==="lawnbobs"&&j.kind==="schedule"){await applySchedule(j);return;}
   if(!j||j.app!=="lawnbobs"||!j.data){toast("That file isn't a Lawn Bobs backup");return;}
   const has=S.clients.length||S.jobs.length||S.ledger.length;
   const d=j.data, summary=`${(d.clients||[]).filter(c=>!c.deleted).length} clients, ${(d.jobs||[]).length} jobs, ${(d.ledger||[]).length} book entries, ${(d.quotes||[]).length} quotes, ${(d.invoices||[]).length} invoices${j.photos&&j.photos.length?`, ${j.photos.length} photos`:""}`;
@@ -1415,8 +1434,37 @@ async function restoreFile(file){
   await photosClear(); memPhotos.clear();
   for(const p of j.photos||[]){try{const bin=atob(p.jpeg);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
     await photoPut({id:p.id,jobId:p.jobId,kind:p.kind,created:p.created,blob:new Blob([u],{type:"image/jpeg"})});}catch(e){}}
+  S.clients.forEach(migrateClient);
   KEYS.forEach(k=>dirty.add(k)); await flush(); askPersist(); await refreshPhotoCounts(); applyTheme();
   closeSheet(); viewWeek=THIS_WEEK; filter=todayIdx; renderAll(); toast("All set — your data is in");
+}
+// A schedule file (made from the Outlook calendar) updates client schedules and upcoming open jobs only.
+// Finished jobs, invoices, quotes, books and photos are left alone.
+async function applySchedule(j){
+  const cl=j.clients||[], jobs=(j.jobs||[]).filter(x=>x.week>=THIS_WEEK);
+  if(!await ask(`Update ${cl.length} clients' schedules from your Outlook calendar${j.through?` (visits through ${fmtDate(j.through)})`:""}? Upcoming open jobs for these clients are rebuilt to match. Finished jobs, invoices and books stay as they are.`,"Update schedule"))return;
+  if(j.rotA)S.settings.rotA=j.rotA;
+  const ids=new Set();
+  for(const u of cl){
+    let c=(u.id&&clientById(u.id))||clientByName(u.n);
+    if(!c){c={id:u.id||"c-"+uid(),added:Date.now(),props:[]};S.clients.push(c);}
+    delete c.deleted; delete c.day; delete c.start;
+    Object.assign(c,{n:u.n,ph:u.ph??c.ph,em:u.em??c.em,co:u.co??c.co,g:u.g,visits:u.visits,price:u.price,svc:u.svc||c.svc||"Lawn maintenance",noText:!!u.noText,notes:u.notes??c.notes??""});
+    if(u.props&&u.props.length){const key=a=>norm(a).replace(/[^a-z0-9]/g,"").slice(0,10);
+      const extra=(c.props||[]).filter(p=>!u.props.some(q=>key(q.a)===key(p.a))&&!/billing/i.test(p.l||""));
+      c.props=u.props.concat(extra);}
+    ids.add(c.id);
+  }
+  const mineC=jb=>{const c=clientOf(jb);return c&&ids.has(c.id);};
+  S.jobs=S.jobs.filter(jb=>!(jb.week>=THIS_WEEK&&!jb.done&&mineC(jb)));      // drop upcoming open jobs for synced clients
+  for(const x of jobs){
+    const c=clientByName(x.n); if(!c)continue;
+    if(S.jobs.some(jb=>jb.done&&jb.week===x.week&&(jb.clientId===c.id||norm(jb.name)===norm(c.n))))continue;   // already done this week
+    S.jobs.push({id:`cal-${c.id}-${x.week}-${x.day}`,clientId:c.id,auto:true,name:c.n,addr:x.addr||primaryAddr(c),detail:x.svc||c.svc||"Lawn maintenance",note:c.notes||"",price:+x.price||+c.price||0,extras:[],day:x.day,week:x.week,created:Date.now()+x.day,done:false});
+  }
+  S.settings.calSync=Date.now();
+  save("clients","jobs","settings"); viewWeek=THIS_WEEK; filter="all"; closeSheet(); renderAll();
+  toast("Schedule now matches your Outlook calendar");
 }
 $("restoreInput").addEventListener("change",e=>{const f=e.target.files[0];e.target.value="";if(f)restoreFile(f);});
 async function storageText(){try{if(!navigator.storage||!navigator.storage.estimate)return "";const e=await navigator.storage.estimate();const p=navigator.storage.persisted?await navigator.storage.persisted():false;
@@ -1450,13 +1498,17 @@ async function openSettings(){
     <label class="chk"><input type="checkbox" id="sBkPhotos" ${s.backupPhotos!==false?"checked":""}> Include photos in backups (bigger file)</label>
     <button class="bigbtn" id="setBackup">${ICON.down}<span><b>Back up now</b><small>Save a file to Google Drive or your phone</small></span></button>
     <button class="bigbtn" id="setRestore">${ICON.share}<span><b>Restore or import from a file</b><small>Use a backup or your LawnBobs-import file</small></span></button>
+    <span class="sec">Schedule</span>
+    <label class="flabel" for="sRot">This week (${weekRange(THIS_WEEK)}) is</label>
+    <select id="sRot"><option value="A">Week A</option><option value="B">Week B</option></select>
+    <p class="note">Your rotation: one week's yard days, then the other's. Clients' auto-filled visits follow it.${s.calSync?` Last synced with Outlook ${fmtDate(dKey(new Date(s.calSync)))}.`:""}</p>
     <span class="sec">App</span>
     <label class="flabel" for="sTheme">Look</label>
     <select id="sTheme"><option value="auto">Match my phone</option><option value="light">Always light (best in sun)</option><option value="dark">Always dark</option></select>
     ${installEvt&&!standalone()?`<button class="btn green wide" id="setInstall">Install on home screen</button>`:""}
     <p class="note" id="storeTxt"></p>
-    <p class="note">Lawn Bobs app v1 · works offline</p>`,"Settings");
-  $("sTheme").value=s.theme||"auto";
+    <p class="note">Lawn Bobs app v2 · works offline</p>`,"Settings");
+  $("sTheme").value=s.theme||"auto"; $("sRot").value=weekLetter(THIS_WEEK);
   storageText().then(t=>{if($("storeTxt"))$("storeTxt").textContent=t;});
   $("sheet").onclick=async e=>{
     const t=e.target;
@@ -1473,6 +1525,7 @@ function saveSettingsForm(){
   Object.assign(s,{owner:v("sOwner"),bizName:v("sBiz")||DEF_SETTINGS.bizName,phone:v("sPhone")?fmtPhone(v("sPhone")):"",email:v("sEmail"),area:v("sArea"),
     payable:v("sPayable"),venmo:v("sVenmo"),cashapp:v("sCash"),zelle:v("sZelle"),otw:v("sOtw")||DEF_SETTINGS.otw,terms:v("sTerms"),invTerms:v("sInvTerms"),
     goalWeek:num(v("sGoalW")),goalMonth:num(v("sGoalM")),taxPct:Math.min(60,num(v("sTaxPct"))),backupPhotos:$("sBkPhotos").checked,theme:$("sTheme").value});
+  if($("sRot").value!==weekLetter(THIS_WEEK)){s.rotA=$("sRot").value==="A"?THIS_WEEK:shiftWeek(THIS_WEEK,-1);S.clients.forEach(c=>resetAutoJobs(c.id));}
   const ni=parseInt(v("sNextInv"),10), nq=parseInt(v("sNextQ"),10); if(ni>0)s.nextInv=ni; if(nq>0)s.nextQuote=nq;
   save("settings"); applyTheme(); closeSheet(); renderAll(); toast("Settings saved");
 }
@@ -1499,6 +1552,7 @@ $("eDate").value=todayKey(); renderCats();
 (async()=>{
   idb=await idbOpen();
   for(const k of KEYS){try{const v=await kvGet(k);if(k==="settings")S.settings={...DEF_SETTINGS,...(v||{})};else if(Array.isArray(v))S[k]=v;}catch(e){}}
+  S.clients.forEach(migrateClient);
   applyTheme(); await refreshPhotoCounts();
   let t="jobs"; try{t=sessionStorage.getItem("lb-tab")||"jobs";}catch(e){} if(!TABS[t])t="jobs";
   renderAll(); showTab(t);

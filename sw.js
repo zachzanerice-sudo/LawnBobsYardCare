@@ -1,5 +1,5 @@
 // Lawn Bobs offline support: the app shell is cached so it opens with no signal.
-const VERSION = "lb-v1";
+const VERSION = "lb-v2";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
